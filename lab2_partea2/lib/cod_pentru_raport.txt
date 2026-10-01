@@ -1,0 +1,339 @@
+platformio.ini
+; Configurarea placii Arduino Mega 2560 si a bibliotecii FreeRTOS.
+[env:megaatmega2560]
+platform = atmelavr
+board = megaatmega2560
+framework = arduino
+monitor_speed = 9600
+lib_deps =
+    feilipu/FreeRTOS
+build_flags =
+    ; Inlocuim temporizarea implicita cu Timer1: 1000 tick-uri/s, adica 1 ms/tick.
+    ; Optiunile se aplica global, inclusiv la compilarea bibliotecii FreeRTOS.
+    -DfreeRTOSVariant_h
+    -DconfigTICK_RATE_HZ=1000
+    -DportTICK_PERIOD_MS=1
+    -DportSCHEDULER_ISR=TIMER1_COMPA_vect
+
+Cod Arduino
+// 1. BIBLIOTECI, CONSTANTE SI DECLARATII
+// Listare reunita pentru raport; configuratia PlatformIO de mai sus este necesara.
+#include <Arduino_FreeRTOS.h>
+#include <Arduino.h>
+#include <task.h>
+#include <semphr.h>
+#include <queue.h>
+
+// Coada contine cel mult 31 de valori utile si markerul 0 de sfarsit de serie.
+// Separat, memoram cel mult 32 de apasari care asteapta sa fie procesate.
+constexpr uint8_t QUEUE_LENGTH = 32;
+constexpr uint8_t MAX_N = QUEUE_LENGTH - 1;
+constexpr uint8_t MAX_PENDING_PRESSES = 32;
+static_assert(MAX_N < 255, "N trebuie sa incapa intr-un byte fara overflow");
+// Declaratii ale resurselor partajate; definitiile sunt grupate mai jos.
+extern SemaphoreHandle_t buttonSemaphore;
+extern SemaphoreHandle_t serialMutex;
+extern QueueHandle_t dataQueue;
+extern volatile uint8_t pendingPresses;
+extern volatile bool pressOverflow;
+extern volatile bool seriesReady;
+extern TaskHandle_t buttonTaskHandle;
+extern TaskHandle_t syncTaskHandle;
+extern TaskHandle_t asyncTaskHandle;
+void initializeRtosResources();
+// Butonul leaga D2 la GND; LED1 si LED2 sunt comandate de D9, respectiv D8.
+const uint8_t BUTTON_PIN = 2;
+const uint8_t LED1_PIN   = 9;
+const uint8_t LED2_PIN   = 8;
+void initializeHardware();
+void printMessage(const __FlashStringHelper *message);
+void printTask2N(uint8_t n);
+void printStartupMessages();
+void TaskButtonLed(void *pvParameters);
+void TaskSync(void *pvParameters);
+void TaskAsync(void *pvParameters);
+
+// 2. RESURSE COMUNE SI INITIALIZARE
+// Semaforul binar trezeste Task 2; mutexul impiedica intrepatrunderea mesajelor Serial.
+// Coada transmite valori uint8_t de la Task 2 (producator) la Task 3 (consumator).
+SemaphoreHandle_t buttonSemaphore;
+SemaphoreHandle_t serialMutex;
+QueueHandle_t dataQueue;
+// Contorul retine evenimentele, deoarece un semafor binar nu numara apasarile.
+// Accesul concurent la contor si la indicatorul de depasire este protejat prin sectiuni critice.
+// volatile impune recitirea variabilelor partajate, dar nu inlocuieste sincronizarea.
+volatile uint8_t pendingPresses = 0;
+volatile bool pressOverflow = false;
+// false: producatorul poate construi seria; true: consumatorul poate extrage datele.
+volatile bool seriesReady = false;
+// Identificatorii task-urilor permit verificarea rezervei minime de stiva.
+TaskHandle_t buttonTaskHandle;
+TaskHandle_t syncTaskHandle;
+TaskHandle_t asyncTaskHandle;
+// Crearea resurselor se face inaintea task-urilor; o alocare esuata opreste programul.
+void initializeRtosResources() {
+    buttonSemaphore = xSemaphoreCreateBinary();
+    serialMutex = xSemaphoreCreateMutex();
+    dataQueue = xQueueCreate(QUEUE_LENGTH, sizeof(uint8_t));
+    if (buttonSemaphore == NULL || serialMutex == NULL || dataQueue == NULL) {
+        Serial.println(F("EROARE: resursele FreeRTOS nu au fost create!"));
+        while (1) {}
+    }
+}
+// Rezistenta interna pull-up mentine D2 la HIGH; apasarea produce nivelul LOW.
+// Iesirile LED pornesc la LOW, deci ambele LED-uri sunt initial stinse.
+void initializeHardware() {
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    pinMode(LED1_PIN, OUTPUT);
+    pinMode(LED2_PIN, OUTPUT);
+    digitalWrite(LED1_PIN, LOW);
+    digitalWrite(LED2_PIN, LOW);
+}
+
+// 3. BAZA DE TIMP FREERTOS: TIMER1
+// Verificarile la compilare confirma rezolutia de 1 ms si frecventa placii de 16 MHz.
+static_assert(configTICK_RATE_HZ == 1000, "Este necesar tick-ul de 1 ms");
+static_assert(pdMS_TO_TICKS(10) == 10, "Configuratie tick incorecta");
+static_assert(F_CPU == 16000000UL, "Timer1 este configurat pentru Mega 16 MHz");
+// Portul FreeRTOS apeleaza aceasta functie la pornirea schedulerului.
+// Modul CTC, prescalerul 64 si OCR1A = 249 dau 16 MHz / 64 / 250 = 1000 Hz.
+// Timer1 este rezervat schedulerului; Timer0, utilizat de millis(), ramane disponibil.
+extern "C" void prvSetupTimerInterrupt(void) {
+    TIMSK1 = 0;
+    TCCR1A = 0;
+    TCCR1B = 0;
+    TCNT1 = 0;
+    OCR1A = 249;
+    // Stergem indicatorii de intrerupere, pornim contorul si activam comparatia A.
+    TIFR1 = _BV(OCF1A) | _BV(OCF1B) | _BV(OCF1C) | _BV(TOV1);
+    TCCR1B = _BV(WGM12) | _BV(CS11) | _BV(CS10);
+    TIMSK1 = _BV(OCIE1A);
+}
+// Hook de temporizare cerut de portul FreeRTOS cand nu se foloseste watchdog-ul.
+// La 1 ms/tick, milisecundele corespund tick-urilor; segmentele evita limita de 16 biti.
+extern "C" void vPortDelay(const uint32_t ms) {
+    uint32_t remaining = ms;
+    while (remaining != 0) {
+        const TickType_t part = remaining > 60000UL ? 60000 : remaining;
+        vTaskDelay(part);
+        remaining -= part;
+    }
+}
+
+// 4. AFISAREA MESAJELOR
+// Mutexul este pastrat pana la terminarea mesajului, apoi eliberat pentru alte task-uri.
+// F() pastreaza textele constante in memoria Flash, economisind memoria RAM.
+void printMessage(const __FlashStringHelper *message) {
+    if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
+        Serial.println(message);
+        xSemaphoreGive(serialMutex);
+    }
+}
+void printTask2N(uint8_t n) {
+    if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
+        Serial.print(F("[TASK 2] Apasare procesata. N = "));
+        Serial.println(n);
+        xSemaphoreGive(serialMutex);
+    }
+}
+// Mesajele initiale sunt afisate in setup(), inainte de executia concurenta a task-urilor.
+void printStartupMessages() {
+    Serial.println();
+    Serial.println(F("===================================="));
+    Serial.println(F(" LAB 2.2 - FreeRTOS"));
+    Serial.println(F("===================================="));
+    Serial.println(F("D2 -> Buton (INPUT_PULLUP)"));
+    Serial.println(F("D9 -> LED1"));
+    Serial.println(F("D8 -> LED2"));
+    Serial.println(F("------------------------------------"));
+    Serial.println(F("Task 1: perioada 10 ms"));
+    Serial.println(F("Task 2: Semaphore + Queue"));
+    Serial.println(F("Task 3: perioada 200 ms"));
+    Serial.println(F("Mutex: protectie Serial"));
+    Serial.println(F("Timer1: tick 1 ms; debounce: 30 ms"));
+    Serial.println(F("Queue: 32 bytes; N saturat la 31"));
+    Serial.println(F("Cel mult 32 apasari in asteptare"));
+    Serial.println(F("===================================="));
+}
+
+// 5. TASK 1: CITIREA BUTONULUI SI COMANDA LED1
+// Perioada nominala: 10 ms. Prioritate: 3, cea mai mare dintre task-urile aplicatiei.
+// O apasare validata aprinde LED1 timp de 1 s si notifica Task 2.
+void TaskButtonLed(void *pvParameters) {
+    (void)pvParameters;
+    TickType_t lastWakeTime = xTaskGetTickCount();
+    bool lastRawPressed = false;
+    bool stablePressed = false;
+    TickType_t lastChangeTime = lastWakeTime;
+    bool led1Active = false;
+    TickType_t led1StartTime = 0;
+    for (;;) {
+        const TickType_t now = xTaskGetTickCount();
+        const bool pressed = (digitalRead(BUTTON_PIN) == LOW);
+        // Orice schimbare a semnalului brut reporneste intervalul de stabilizare.
+        if (pressed != lastRawPressed) {
+            lastRawPressed = pressed;
+            lastChangeTime = now;
+        }
+        // Debounce: acceptam noua stare numai dupa 30 ms fara schimbari.
+        // Se filtreaza atat apasarea, cat si eliberarea; evenimentul apare doar la apasare.
+        if (pressed != stablePressed && (TickType_t)(now - lastChangeTime) >= pdMS_TO_TICKS(30)) {
+            stablePressed = pressed;
+            if (stablePressed) {
+                digitalWrite(LED1_PIN, HIGH);
+                led1Active = true;
+                // O noua apasare prelungeste aprinderea cu 1 s de la momentul curent.
+                led1StartTime = now;
+                taskENTER_CRITICAL();
+                if (pendingPresses < MAX_PENDING_PRESSES)
+                    ++pendingPresses;
+                else
+                    pressOverflow = true;
+                taskEXIT_CRITICAL();
+                // Daca Task 2 este ocupat, contorul pastreaza apasarile pana la limita admisa.
+                xSemaphoreGive(buttonSemaphore);
+            }
+        }
+        // Verificam timpul scurs fara o pauza de 1 s, astfel incat butonul sa fie citit in continuare.
+        if (led1Active) {
+            TickType_t elapsed =
+                now - led1StartTime;
+            if (elapsed >= pdMS_TO_TICKS(1000)) {
+                digitalWrite(LED1_PIN, LOW);
+                led1Active = false;
+            }
+        }
+        // Referinta absoluta limiteaza deriva perioadei provocata de durata executiei.
+        vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(10));
+    }
+}
+
+// 6. TASK 2: PROCESAREA APASARILOR SI PRODUCEREA SERIEI
+// Prioritate: 2. Asteapta semaforul, proceseaza apasarile memorate si clipeste LED2.
+// N creste la fiecare apasare procesata, pana la limita de 31.
+void TaskSync(void *pvParameters) {
+    (void)pvParameters;
+    uint8_t N = 0;
+    for (;;) {
+        // In lipsa unui eveniment, task-ul ramane blocat fara sa consume timp de procesor.
+        if (xSemaphoreTake(buttonSemaphore, portMAX_DELAY) == pdTRUE) {
+            for (;;) {
+                taskENTER_CRITICAL();
+                // Preluam atomic o apasare, apoi iesim rapid din sectiunea critica.
+                const bool hasPendingPress = pendingPresses != 0;
+                if (hasPendingPress)
+                    --pendingPresses;
+                taskEXIT_CRITICAL();
+                if (!hasPendingPress)
+                    break;
+                // Nu incepem o serie noua pana cand Task 3 nu a consumat markerul celei precedente.
+                while (seriesReady)
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                if (N < MAX_N)
+                    ++N;
+                else
+                    printMessage(F("[TASK 2] Limita N=31; repet seria 1..31."));
+                printTask2N(N);
+                // Inserarea la inceput inverseaza ordinea: trimitem 0, N, ..., 1,
+                // iar consumatorul va primi 1, 2, ..., N, 0. Zero delimiteaza seria.
+                uint8_t endMarker = 0;
+                BaseType_t sent = xQueueSendToFront(dataQueue, &endMarker, 0);
+                TickType_t lastSendTime = xTaskGetTickCount();
+                for (uint8_t i = N; i >= 1 && sent == pdPASS; --i) {
+                    // Pastram intervalul nominal de 50 ms inclusiv intre marker si valoarea N.
+                    vTaskDelayUntil(&lastSendTime, pdMS_TO_TICKS(50));
+                    uint8_t value = i;
+                    sent = xQueueSendToFront(dataQueue, &value, 0);
+                }
+                // Publicam numai serii complete; o eroare anuleaza continutul cozii.
+                if (sent != pdPASS) {
+                    xQueueReset(dataQueue);
+                    printMessage(F("[TASK 2] EROARE Queue; serie anulata."));
+                    continue;
+                }
+                // Task 3 poate incepe citirea abia dupa terminarea tuturor insertarilor.
+                seriesReady = true;
+                // LED2 clipeste de N ori: 300 ms aprins si 500 ms stins.
+                // vTaskDelay blocheaza doar acest task, permitand executia celorlalte.
+                for (uint8_t i = 0; i < N; i++) {
+                    digitalWrite(LED2_PIN, HIGH);
+                    vTaskDelay(pdMS_TO_TICKS(300));
+                    digitalWrite(LED2_PIN, LOW);
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                }
+                printMessage(F("[TASK 2] Secventa LED2 terminata"));
+            }
+        }
+    }
+}
+
+// 7. TASK 3: CONSUMAREA SERIEI SI DIAGNOSTIC
+// Perioada nominala: 200 ms. Prioritate: 1. Extrage cel mult un byte la fiecare activare.
+void TaskAsync(void *pvParameters) {
+    (void)pvParameters;
+    TickType_t lastWakeTime = xTaskGetTickCount();
+    uint8_t value;
+    for (;;) {
+        // Timpul de asteptare 0 face citirea neblocanta; seria trebuie sa fie deja publicata.
+        if (seriesReady && xQueueReceive(dataQueue, &value, 0) == pdTRUE) {
+            if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
+                if (value == 0) {
+                    Serial.println();
+                    Serial.println(F("[TASK 3] Sfarsit serie"));
+                    // High-water mark indica minimul de stiva libera observat; pe AVR este in bytes.
+                    Serial.print(F("[STACK liber B] T1/T2/T3: "));
+                    Serial.print(uxTaskGetStackHighWaterMark(buttonTaskHandle));
+                    Serial.print('/');
+                    Serial.print(uxTaskGetStackHighWaterMark(syncTaskHandle));
+                    Serial.print('/');
+                    Serial.println(uxTaskGetStackHighWaterMark(asyncTaskHandle));
+                }
+                else {
+                    Serial.print(F("[TASK 3] Byte citit: "));
+                    Serial.println(value);
+                }
+                xSemaphoreGive(serialMutex);
+            }
+            // Consumul markerului permite producatorului sa construiasca urmatoarea serie.
+            if (value == 0)
+                seriesReady = false;
+        }
+        taskENTER_CRITICAL();
+        // Preluam si resetam atomic avertizarea; mesajul se afiseaza in afara sectiunii critice.
+        const bool overflow = pressOverflow;
+        pressOverflow = false;
+        taskEXIT_CRITICAL();
+        if (overflow)
+            printMessage(F("[AVERTIZARE] 32 apasari in asteptare; exces ignorat."));
+        vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(200));
+    }
+}
+
+// 8. PORNIREA APLICATIEI
+// Initializam hardware-ul si resursele, apoi cream task-urile inaintea schedulerului.
+void setup() {
+    initializeHardware();
+    Serial.begin(9600);
+    initializeRtosResources();
+    printStartupMessages();
+    BaseType_t result1;
+    BaseType_t result2;
+    BaseType_t result3;
+    // Pe AVR, dimensiunile stivelor sunt in bytes: 192 pentru T1, 256 pentru T2 si T3.
+    // Prioritatile 3 > 2 > 1 favorizeaza citirea rapida a butonului.
+    result1 = xTaskCreate(TaskButtonLed, "Button", 192, NULL, 3, &buttonTaskHandle);
+    result2 = xTaskCreate(TaskSync, "Sync", 256, NULL, 2, &syncTaskHandle);
+    result3 = xTaskCreate(TaskAsync, "Async", 256, NULL, 1, &asyncTaskHandle);
+    // Nu continuam daca memoria disponibila nu a permis crearea tuturor task-urilor.
+    if (result1 != pdPASS || result2 != pdPASS || result3 != pdPASS) {
+        Serial.println(F("EROARE: unul dintre task-uri nu a fost creat!"));
+        while (1) {}
+    }
+    Serial.println(F("Toate task-urile au fost create."));
+    Serial.println(F("Sistem pornit. Apasa butonul."));
+    Serial.println(F("===================================="));
+    // Asteptam transmiterea mesajelor initiale inainte de pornirea schedulerului.
+    Serial.flush();
+}
+// Executia aplicatiei este realizata de task-urile FreeRTOS, deci loop() ramane gol.
+void loop() {}
