@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="730" viewBox="0 0 1120 730">
+  <rect width="1120" height="730" fill="#f8fafc"/>
+  <style>text{font-family:Arial,sans-serif;fill:#17283b} .wire{fill:none;stroke:#263d52;stroke-width:3;stroke-linejoin:round}.label{font-size:20px}.small{font-size:17px}</style>
+  <text x="48" y="52" font-size="29" font-weight="bold">Laborator 2.1 · Arduino Mega 2560</text>
+  <text x="48" y="86" class="label">Două LED-uri · trei butoane · raportare prin USB / Serial</text>
+  <rect x="48" y="130" width="305" height="445" rx="18" fill="#deedf2" stroke="#167d92" stroke-width="3"/>
+  <text x="75" y="178" font-size="25" font-weight="bold">MEGA 2560</text>
+  <text x="75" y="212" class="small">Alimentare: USB de la PC</text>
+  <text x="75" y="245" class="small">Monitor Serial: 115200 baud</text>
+  <text x="302" y="296" class="label">D8</text>
+  <text x="302" y="366" class="label">D9</text>
+  <text x="302" y="436" class="label">D2</text>
+  <text x="302" y="491" class="label">D3</text>
+  <text x="302" y="546" class="label">D4</text>
+  <text x="75" y="295" class="small">Ieșiri LED</text>
+  <text x="75" y="435" class="small">Intrări INPUT_PULLUP</text>
+  <text x="75" y="468" class="small">Apăsat = LOW</text>
+  <text x="75" y="548" class="label">GND</text>
+  <g class="wire">
+    <path d="M353 290 H450 M520 290 H622 M668 290 H975 V605"/>
+    <rect x="450" y="278" width="70" height="24" fill="white"/>
+    <path d="M622 272 L654 290 L622 308 Z M658 272 V308 M658 290 H668" fill="#f87171"/>
+    <path d="M653 265 L675 245 M665 268 L687 248 M669 245 H675 V251 M681 248 H687 V254"/>
+    <path d="M353 360 H450 M520 360 H622 M668 360 H975"/>
+    <rect x="450" y="348" width="70" height="24" fill="white"/>
+    <path d="M622 342 L654 360 L622 378 Z M658 342 V378 M658 360 H668" fill="#4ade80"/>
+    <path d="M653 335 L675 315 M665 338 L687 318 M669 315 H675 V321 M681 318 H687 V324"/>
+    <path d="M353 430 H600 M600 430 L652 407 M664 430 H975"/>
+    <path d="M353 485 H600 M600 485 L652 462 M664 485 H975"/>
+    <path d="M353 540 H600 M600 540 L652 517 M664 540 H975"/>
+    <path d="M103 575 V605 H975 M930 605 V625 M908 625 H952 M916 634 H944 M924 643 H936"/>
+  </g>
+  <g fill="#263d52">
+    <circle cx="600" cy="430" r="4"/><circle cx="664" cy="430" r="4"/>
+    <circle cx="600" cy="485" r="4"/><circle cx="664" cy="485" r="4"/>
+    <circle cx="600" cy="540" r="4"/><circle cx="664" cy="540" r="4"/>
+    <circle cx="975" cy="360" r="5"/><circle cx="975" cy="430" r="5"/>
+    <circle cx="975" cy="485" r="5"/><circle cx="975" cy="540" r="5"/>
+  </g>
+  <text x="450" y="265" class="small">R1 · 220 Ω</text>
+  <text x="450" y="335" class="small">R2 · 220 Ω</text>
+  <text x="725" y="277" class="label">LED1 · stare</text>
+  <text x="725" y="347" class="label">LED2 · intermitent</text>
+  <text x="603" y="325" class="small">A</text><text x="653" y="325" class="small">K</text>
+  <text x="725" y="419" class="label">B1 · comutare</text>
+  <text x="725" y="474" class="label">B+ · durată +</text>
+  <text x="725" y="529" class="label">B− · durată −</text>
+  <text x="475" y="596" class="small">GND comun · bara „−” a breadboardului</text>
+  <text x="48" y="671" class="small">Butoane normal deschise, conectate între pin și GND. Rezistențele pull-up sunt interne.</text>
+  <text x="48" y="703" class="small">A = anod (picior lung) · K = catod (picior scurt / margine teșită). Fiecare LED are rezistor separat.</text>
+</svg>
