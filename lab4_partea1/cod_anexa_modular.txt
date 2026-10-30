@@ -1,0 +1,199 @@
+COD SURSA MODULAR COMENTAT - LABORATORUL 4, PARTEA 1
+Fisierele originale .h si .cpp raman separate in proiect. Comentariile sunt plasate langa codul relevant.
+
+// =====================================================
+// FISIER: include/command_processor.h
+// =====================================================
+
+void normalizeCommand(char* text);
+void processSerialCommand(char* command);
+
+// =====================================================
+// FISIER: include/config.h
+// =====================================================
+
+constexpr uint8_t RELAY_PIN = 7;
+constexpr bool RELAY_ACTIVE_LOW = true;
+
+// =====================================================
+// FISIER: include/keypad_input.h
+// =====================================================
+
+void initKeypad();
+void readKeypad();
+
+// =====================================================
+// FISIER: include/lcd_display.h
+// =====================================================
+
+void initLcd();
+void showLcd(const char* line1, const char* line2);
+void displayRelayState();
+void displayError();
+
+// =====================================================
+// FISIER: include/relay.h
+// =====================================================
+
+void initRelay();
+void setRelay(bool state);
+bool getRelayState();
+
+// =====================================================
+// FISIER: include/reporting.h
+// =====================================================
+
+void showMenu();
+void activateRelay();
+void deactivateRelay();
+void showStatus();
+
+// =====================================================
+// FISIER: include/serial_input.h
+// =====================================================
+
+void readSerialCommand();
+
+// =====================================================
+// FISIER: include/stdio_redirect.h
+// =====================================================
+
+void initStdio();
+
+// =====================================================
+// FISIER: include/system_state.h
+// =====================================================
+
+extern bool relayState;
+
+// =====================================================
+// FISIER: src/command_processor.cpp
+// =====================================================
+
+// Uniformizeaza textul: elimina spatiile in exces si transforma literele in minuscule.
+void normalizeCommand(char* text) {
+    size_t readIndex = 0, writeIndex = 0; bool previousSpace = false;
+    while (text[readIndex] != '\0' && isspace((unsigned char)text[readIndex])) readIndex++;
+    while (text[readIndex] != '\0') { char c = (char)tolower((unsigned char)text[readIndex++]); if (isspace((unsigned char)c)) { if (writeIndex > 0 && !previousSpace) { text[writeIndex++] = ' '; previousSpace = true; } } else { text[writeIndex++] = c; previousSpace = false; } }
+    if (writeIndex > 0 && text[writeIndex - 1] == ' ') {
+        writeIndex--;
+    }
+
+    text[writeIndex] = '\0';
+}
+// Analizeaza comanda seriala si executa doar comenzile valide.
+void processSerialCommand(char* command) {
+    normalizeCommand(command); if (command[0] == '\0') return; printf("\n[COMANDA] %s\n", command);
+    char action[16] = "", argument[16] = "", extra[2] = "";
+    // Separa actiunea si argumentul, respingand cuvintele suplimentare.
+    int count = sscanf(command, "%15s %15s %1s", action, argument, extra);
+    if (count == 2 && strcmp(action, "relay") == 0 && strcmp(argument, "on") == 0) activateRelay();
+    else if (count == 2 && strcmp(action, "relay") == 0 && strcmp(argument, "off") == 0) deactivateRelay();
+    else if (strcmp(command, "status") == 0) showStatus();
+    else if (strcmp(command, "help") == 0) { showMenu(); showLcd("KEYPAD A-D", "A ON B OFF C D"); }
+    else { displayError(); printf("[EROARE] Comanda invalida!\n"); printf("Utilizeaza: relay on / relay off\n"); printf("Starea releului ramane: %s\n", getRelayState() ? "ON" : "OFF"); }
+}
+
+// =====================================================
+// FISIER: src/keypad_input.cpp
+// =====================================================
+
+const byte ROWS = 4, COLS = 4;
+char keys[ROWS][COLS] = {{'1','2','3','A'}, {'4','5','6','B'}, {'7','8','9','C'}, {'*','0','#','D'}};
+byte rowPins[ROWS] = {22, 23, 24, 25}; byte colPins[COLS] = {26, 27, 28, 29};
+// Asociaza matricea de taste cu pinii keypad-ului 4x4.
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+// Debounce-ul reduce detectarea repetata a aceleiasi apasari.
+void initKeypad() { keypad.setDebounceTime(30); }
+// Traduce tastele A-D in actiuni pentru releu.
+void readKeypad( { char key = keypad.getKey(); if (key == NO_KEY) return; printf("\n[KEYPAD] Tasta: %c\n", key); switch (key) { case 'A': activateRelay(); break; case 'B': deactivateRelay(); break; case 'C': showStatus(); break; case 'D': showMenu(); showLcd("KEYPAD A-D", "A ON B OFF C D"); break; default: displayError(); printf("[EROARE] Tasta %c neutilizata!\n", key); printf("Foloseste A, B, C sau D.\n"); break; } }
+
+// =====================================================
+// FISIER: src/lcd_display.cpp
+// =====================================================
+
+LiquidCrystal_I2C lcd27(0x27, 16, 2);
+LiquidCrystal_I2C lcd3F(0x3F, 16, 2);
+LiquidCrystal_I2C* lcd = nullptr;
+// Verifica daca un dispozitiv raspunde pe o adresa I2C.
+bool i2cDeviceFound(byte address) { Wire.beginTransmission(address); return Wire.endTransmission() == 0; }
+// Scaneaza I2C, selecteaza automat LCD-ul la 0x27 sau 0x3F si il initializeaza.
+void initLcd() {
+    Wire.begin(); delay(100); printf("\nScanare I2C...\n"); bool foundAny = false;
+    for (byte address = 1; address < 127; address++) if (i2cDeviceFound(address)) { printf("Dispozitiv I2C: 0x%02X\n", address); foundAny = true; }
+    if (!foundAny) printf("[EROARE] Niciun dispozitiv I2C!\n");
+    if (i2cDeviceFound(0x27)) { lcd = &lcd27; printf("LCD selectat: 0x27\n"); }
+    else if (i2cDeviceFound(0x3F)) { lcd = &lcd3F; printf("LCD selectat: 0x3F\n"); }
+    else { printf("[EROARE] LCD nedetectat!\n"); return; }
+    lcd->init(); lcd->backlight(); lcd->clear(); lcd->setCursor(0, 0); lcd->print("LABORATOR 4.1"); lcd->setCursor(0, 1); lcd->print("Sistem pornit"); delay(1500);
+}
+// Scrie cele doua randuri ale ecranului doar daca LCD-ul este disponibil.
+void showLcd(const char* line1, const char* line2) { if (lcd == nullptr) return; lcd->clear(); lcd->setCursor(0, 0); lcd->print(line1); lcd->setCursor(0, 1); lcd->print(line2); }
+void displayRelayState() { if (getRelayState()) showLcd("RELAY CONTROL", "STATUS: ON"); else showLcd("RELAY CONTROL", "STATUS: OFF"); }
+void displayError() { showLcd("EROARE COMANDA", "Comanda invalida"); }
+
+// =====================================================
+// FISIER: src/main.cpp
+// =====================================================
+
+// Ruleaza o data: initializeaza comunicatia si toate modulele hardware.
+void setup() { Serial.begin(9600); initStdio(); initRelay(); initLcd(); initKeypad(); displayRelayState(); printf("\nSistem initializat!\n"); printf("Stare initiala: OFF\n"); showMenu(); printf("\nIntrodu o comanda: "); }
+// Ruleaza continuu: proceseaza comenzile seriale si keypad-ul.
+void loop() { readSerialCommand(); readKeypad(); }
+
+// =====================================================
+// FISIER: src/relay.cpp
+// =====================================================
+
+// Configureaza releul in starea OFF, tinand cont de logica active-low.
+void initRelay() { digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW); pinMode(RELAY_PIN, OUTPUT); relayState = false; }
+// Scrie nivelul electric corect si pastreaza starea logica a releului.
+void setRelay(bool state) { relayState = state; digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? (state ? LOW : HIGH) : (state ? HIGH : LOW)); printf("[RELEU] %s\n", state ? "ON" : "OFF"); }
+bool getRelayState() { return relayState; }
+
+// =====================================================
+// FISIER: src/reporting.cpp
+// =====================================================
+
+// Afiseaza comenzile disponibile pentru Serial Monitor si keypad.
+void showMenu() { printf("\n================================\n"); printf(" LABORATOR 4.1 - CONTROL RELEU\n"); printf("================================\n"); printf("SERIAL:\n"); printf(" relay on  - Pornire\n relay off - Oprire\n status    - Stare curenta\n help      - Meniu\n"); printf("\nKEYPAD:\n"); printf(" A - Pornire releu\n B - Oprire releu\n C - Stare curenta\n D - Afisare meniu\n"); printf("================================\n"); }
+// Porneste releul si sincronizeaza LCD-ul cu noua stare.
+void activateRelay() { setRelay(true); displayRelayState(); printf("[OK] LED APRINS\n"); }
+// Opreste releul si sincronizeaza LCD-ul cu noua stare.
+void deactivateRelay() { setRelay(false); displayRelayState(); printf("[OK] LED STINS\n"); }
+void showStatus() { displayRelayState(); printf("[STATUS] Releu: %s\n", getRelayState() ? "ON" : "OFF"); }
+
+// =====================================================
+// FISIER: src/serial_input.cpp
+// =====================================================
+
+// Buffer limitat pentru o comanda; overflow semnaleaza intrare prea lunga.
+char serialBuffer[48]; size_t serialIndex = 0; bool inputOverflow = false;
+// Citeste serial neblocant, cu suport pentru Enter, Backspace si echo.
+void readSerialCommand( {
+    while (Serial.available() > 0) {
+        char c = (char)Serial.read();
+        if (c == '\r' || c == '\n') { if (serialIndex == 0 && !inputOverflow) continue; printf("\n"); if (inputOverflow) { displayError(); printf("[EROARE] Comanda prea lunga!\n"); } else { serialBuffer[serialIndex] = '\0'; processSerialCommand(serialBuffer); } serialIndex = 0; inputOverflow = false; printf("\nIntrodu o comanda: "); }
+        else if (c == '\b' || c == 127) { if (serialIndex > 0) { serialIndex--; Serial.print("\b \b"); } }
+        else if (isprint((unsigned char)c)) { Serial.write(c); if (!inputOverflow) { if (serialIndex < sizeof(serialBuffer) - 1) serialBuffer[serialIndex++] = c; else inputOverflow = true; } }
+    }
+}
+
+// =====================================================
+// FISIER: src/stdio_redirect.cpp
+// =====================================================
+
+// Fluxul stdout va fi redirectionat spre Serial Monitor.
+static FILE serialOutput;
+// Trimite fiecare caracter generat de printf() prin conexiunea seriala.
+int serialPutChar(char c, FILE* stream) { (void)stream; if (c == '\n') Serial.write('\r'); Serial.write(c); return 0; }
+void initStdio() { fdev_setup_stream(&serialOutput, serialPutChar, NULL, _FDEV_SETUP_WRITE); stdout = &serialOutput; }
+
+// =====================================================
+// FISIER: src/system_state.cpp
+// =====================================================
+
+// Starea logica actuala a releului, initial OFF.
+bool relayState = false;
+
+
